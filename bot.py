@@ -12,15 +12,67 @@ CREATOR_WALLET = "7RYMbGhxJ3gwc74p9fvFPcxL9DoC7RVXnizv7Mvi9zwe"
 CHAT_ID = -1004342444189
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-MIN_BUY_SOL = 0.5  # Minimum SOL buy to announce
+MIN_BUY_SOL = 0.5
 
 # Token state
 current_ca = None
 is_launched = False
 last_wallet_signature = None
 last_buy_signature = None
+cached_price_data = {}  # Stores latest price/MC from DexScreener
 
 http_client = None
+
+
+# ── DEXSCREENER PRICE FETCHER ──────────────────────────────────────────────
+
+async def fetch_dex_data(ca: str) -> dict:
+    """Fetch price and market cap from DexScreener."""
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{ca}"
+        response = await http_client.get(url, timeout=10)
+        data = response.json()
+        pairs = data.get("pairs")
+        if pairs:
+            pair = pairs[0]  # Take most liquid pair
+            return {
+                "price_usd": pair.get("priceUsd", "N/A"),
+                "market_cap": pair.get("fdv"),         # Fully diluted valuation
+                "volume_24h": pair.get("volume", {}).get("h24"),
+                "price_change_24h": pair.get("priceChange", {}).get("h24"),
+                "dex_url": pair.get("url", f"https://dexscreener.com/solana/{ca}"),
+            }
+    except Exception as e:
+        logging.error(f"DexScreener fetch error: {e}")
+    return {}
+
+
+def format_number(value) -> str:
+    """Format large numbers nicely (e.g. 1200000 → $1.2M)."""
+    try:
+        value = float(value)
+        if value >= 1_000_000:
+            return f"${value / 1_000_000:.2f}M"
+        elif value >= 1_000:
+            return f"${value / 1_000:.1f}K"
+        else:
+            return f"${value:.4f}"
+    except Exception:
+        return "N/A"
+
+
+async def monitor_price():
+    """After launch: poll DexScreener every 30s and cache the data."""
+    global cached_price_data
+
+    while True:
+        if is_launched and current_ca and http_client:
+            data = await fetch_dex_data(current_ca)
+            if data:
+                cached_price_data = data
+                logging.info(f"💹 Price updated: ${data.get('price_usd')} | MC: {format_number(data.get('market_cap'))}")
+        await asyncio.sleep(30)
+
 
 # ── PUMP.FUN LAUNCH DETECTION ──────────────────────────────────────────────
 
@@ -78,12 +130,10 @@ def extract_pump_ca(tx_result) -> str:
         account_keys = tx_result["transaction"]["message"]["accountKeys"]
         post_balances = tx_result.get("meta", {}).get("postTokenBalances", [])
 
-        # Check if Pump.fun program is involved
         program_ids = [k["pubkey"] if isinstance(k, dict) else k for k in account_keys]
         if PUMP_FUN_PROGRAM not in program_ids:
             return None
 
-        # The mint is in postTokenBalances
         if post_balances:
             return post_balances[0].get("mint")
 
@@ -145,7 +195,6 @@ def get_buy_amount_sol(tx_result) -> float:
     try:
         pre = tx_result["meta"]["preBalances"]
         post = tx_result["meta"]["postBalances"]
-        # Buyer is index 0, SOL difference = amount spent
         diff = (pre[0] - post[0]) / 1e9
         if diff > 0:
             return round(diff, 3)
@@ -166,10 +215,9 @@ def get_buyer_wallet(tx_result) -> str:
 
 async def send_buy_notification(amount_sol, buyer, signature):
     """Send buy alert to Telegram group."""
-    dex_url = f"https://dexscreener.com/solana/{current_ca}"
+    dex_url = cached_price_data.get("dex_url", f"https://dexscreener.com/solana/{current_ca}")
     pump_url = f"https://pump.fun/{current_ca}"
 
-    # Emoji scale based on buy size
     if amount_sol >= 5:
         emoji = "🐳🐳🐳"
         label = "WHALE BUY"
@@ -182,11 +230,22 @@ async def send_buy_notification(amount_sol, buyer, signature):
 
     short_buyer = f"{buyer[:4]}...{buyer[-4:]}" if len(buyer) > 8 else buyer
 
+    # Add live price/MC if available
+    price_line = ""
+    mc_line = ""
+    if cached_price_data:
+        price = cached_price_data.get("price_usd", "N/A")
+        mc = cached_price_data.get("market_cap")
+        price_line = f"\n💵 Price: *${float(price):.8f}*" if price != "N/A" else ""
+        mc_line = f"\n📊 MC: *{format_number(mc)}*" if mc else ""
+
     message = (
         f"{emoji} *{label} DETECTED!*\n\n"
         f"💰 Amount: *{amount_sol} SOL*\n"
         f"👤 Buyer: `{short_buyer}`\n"
-        f"🪙 Token: *$LICAT*\n\n"
+        f"🪙 Token: *$LICAT*"
+        f"{price_line}"
+        f"{mc_line}\n\n"
         f"[View TX](https://solscan.io/tx/{signature})"
     )
 
@@ -279,15 +338,71 @@ async def x_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_launched and current_ca:
-        keyboard = [[InlineKeyboardButton("🚀 Buy $LICAT", url=f"https://pump.fun/{current_ca}")]]
+    if not is_launched or not current_ca:
+        await update.message.reply_text("⏳ $LICAT hasn't launched yet. Stay tuned! 🚀")
+        return
+
+    # If we have cached data, show it instantly
+    if cached_price_data:
+        price = cached_price_data.get("price_usd", "N/A")
+        mc = cached_price_data.get("market_cap")
+        volume = cached_price_data.get("volume_24h")
+        change = cached_price_data.get("price_change_24h")
+        dex_url = cached_price_data.get("dex_url", f"https://dexscreener.com/solana/{current_ca}")
+
+        change_str = ""
+        if change is not None:
+            arrow = "📈" if float(change) >= 0 else "📉"
+            change_str = f"\n{arrow} 24h Change: *{change}%*"
+
+        message = (
+            f"🪙 *$LICAT Price*\n\n"
+            f"💵 Price: *${float(price):.8f}*\n"
+            f"📊 Market Cap: *{format_number(mc)}*\n"
+            f"💧 Volume 24h: *{format_number(volume)}*"
+            f"{change_str}\n\n"
+            f"Contract: `{current_ca}`"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("📊 DexScreener", url=dex_url)],
+            [InlineKeyboardButton("🚀 Buy $LICAT", url=f"https://pump.fun/{current_ca}")]
+        ]
+
         await update.message.reply_text(
-            f"💰 $LICAT is LIVE!\n\nContract: `{current_ca}`\n\nClick below to buy!",
+            message,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
     else:
-        await update.message.reply_text("Token hasn't launched yet. 🚀")
+        # Fresh fetch if cache is empty
+        await update.message.reply_text("⏳ Fetching price...")
+        data = await fetch_dex_data(current_ca)
+        if data:
+            cached_price_data.update(data)
+            price = data.get("price_usd", "N/A")
+            mc = data.get("market_cap")
+            dex_url = data.get("dex_url", f"https://dexscreener.com/solana/{current_ca}")
+
+            message = (
+                f"🪙 *$LICAT Price*\n\n"
+                f"💵 Price: *${float(price):.8f}*\n"
+                f"📊 Market Cap: *{format_number(mc)}*\n\n"
+                f"Contract: `{current_ca}`"
+            )
+            keyboard = [
+                [InlineKeyboardButton("📊 DexScreener", url=dex_url)],
+                [InlineKeyboardButton("🚀 Buy $LICAT", url=f"https://pump.fun/{current_ca}")]
+            ]
+            await update.message.reply_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ Could not fetch price yet. Check DexScreener:\nhttps://dexscreener.com/solana/{current_ca}"
+            )
 
 
 async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,7 +423,8 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_launched:
         await update.message.reply_text(
-            f"✅ $LICAT is LIVE!\n\nContract: `{current_ca}`\n\nUse /buy to purchase!"
+            f"✅ $LICAT is LIVE!\n\nContract: `{current_ca}`\n\nUse /buy to purchase!",
+            parse_mode='Markdown'
         )
     else:
         await update.message.reply_text(
@@ -334,7 +450,8 @@ async def setca_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     asyncio.create_task(monitor_wallet())
     asyncio.create_task(monitor_buys())
-    logging.info("🐱 $LICAT bot started — monitoring wallet and buys")
+    asyncio.create_task(monitor_price())
+    logging.info("🐱 $LICAT bot started — monitoring wallet, buys, and price")
 
 
 app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
