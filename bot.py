@@ -18,39 +18,35 @@ current_ca = None
 is_launched = False
 last_signature = None
 
-# Solana client
 http_client = None
 
 async def monitor_wallet():
     global current_ca, is_launched, last_signature, http_client
-    
+
     while True:
         try:
             if not http_client:
                 http_client = httpx.AsyncClient()
                 logging.info("Connected to Solana RPC via httpx")
-            
-            # Get recent signatures from creator wallet using RPC
+
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getSignaturesForAddress",
                 "params": [CREATOR_WALLET, {"limit": 5}]
             }
-            
+
             response = await http_client.post(SOLANA_RPC, json=payload)
             data = response.json()
-            
+
             if data.get("result"):
                 signatures = data["result"]
                 if signatures:
                     latest_sig = signatures[0]["signature"]
-                    
-                    # Check if new transaction
+
                     if last_signature != latest_sig:
                         last_signature = latest_sig
-                        
-                        # Get transaction details
+
                         try:
                             tx_payload = {
                                 "jsonrpc": "2.0",
@@ -58,11 +54,10 @@ async def monitor_wallet():
                                 "method": "getTransaction",
                                 "params": [latest_sig, {"maxSupportedTransactionVersion": 0}]
                             }
-                            
+
                             tx_response = await http_client.post(SOLANA_RPC, json=tx_payload)
                             tx_data = tx_response.json()
-                            
-                            # Check for token creation
+
                             if is_token_launch(tx_data):
                                 ca = extract_ca_from_tx(tx_data)
                                 if ca and ca != current_ca:
@@ -70,44 +65,39 @@ async def monitor_wallet():
                                     is_launched = True
                                     logging.info(f"🚀 LAUNCH DETECTED: {ca}")
                                     await send_launch_notification(ca)
-                                    
+
                         except Exception as e:
                             logging.error(f"Error parsing transaction: {e}")
-                        
+
         except Exception as e:
             logging.error(f"Error monitoring wallet: {e}")
             await asyncio.sleep(5)
-            
+
         await asyncio.sleep(2)
 
 def is_token_launch(tx_data) -> bool:
-    # Simplified check - in production parse transaction properly
-    # Look for mint instructions, token creation patterns
     return True
 
 def extract_ca_from_tx(tx_data) -> str:
-    # Simplified extraction - in production parse properly
-    # This would extract the mint address from the transaction
-    return None  # Will need manual set for now
+    return None
 
 async def send_launch_notification(ca):
     jupiter_url = f"https://jup.ag/swap/SOL-{ca}"
     pump_url = f"https://pump.fun/{ca}"
-    
+
     keyboard = [
         [InlineKeyboardButton("🚀 Buy $LICAT", url=jupiter_url)],
         [InlineKeyboardButton("📊 Chart", url=pump_url)],
-        [InlineKeyboardButton("🐱 Website", url="https://licat.io")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     message = (
         f"🚀🚀🚀 $LICAT LAUNCHED! 🚀🚀🚀\n\n"
         f"Contract: `{ca}`\n\n"
         f"Low IQ. Big Bag. Time to moon! 🌙\n\n"
         f"Click below to buy NOW!"
     )
-    
+
     try:
         await app.bot.send_message(
             chat_id=CHAT_ID,
@@ -119,19 +109,7 @@ async def send_launch_notification(ca):
         logging.error(f"Error sending launch notification: {e}")
 
 async def monitor_buys():
-    global current_ca, is_launched
-    
     while True:
-        try:
-            if is_launched and current_ca:
-                # Monitor for large buys on the token
-                # This would check the token's account for large transfers
-                # Simplified for now
-                pass
-                
-        except Exception as e:
-            logging.error(f"Error monitoring buys: {e}")
-            
         await asyncio.sleep(5)
 
 async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,11 +119,10 @@ async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.delete()
         except Exception:
             pass
-        
+
         if is_launched and current_ca:
             jupiter_url = f"https://jup.ag/swap/SOL-{current_ca}"
-            keyboard = [
-                [InlineKeyboardButton("🚀 Buy $LICAT", url=jupiter_url)],
+            keyboard = [ [InlineKeyboardButton("🚀 Buy $LICAT", url=jupiter_url)],
                 [InlineKeyboardButton("📊 Chart", url=f"https://pump.fun/{current_ca}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -215,9 +192,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏳ $LICAT is preparing for launch...\n\nMonitoring creator wallet for launch! 🚀"
         )
 
+async def post_init(application):
+    asyncio.create_task(monitor_wallet())
+    asyncio.create_task(monitor_buys())
 
 # Build application
-app = ApplicationBuilder().token(TOKEN).build()
+app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
 # Add handlers
 app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
@@ -227,15 +207,7 @@ app.add_handler(CommandHandler("price", price_command))
 app.add_handler(CommandHandler("buy", buy_command))
 app.add_handler(CommandHandler("status", status_command))
 
-async def main():
-    # Start background tasks
-    asyncio.create_task(monitor_wallet())
-    asyncio.create_task(monitor_buys())
-    
-    # Run the bot
+if name == "__main__":
     logging.info("Starting $LICAT bot...")
-    await app.run_polling()
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    app.run_polling()
+            
