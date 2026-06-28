@@ -1,9 +1,9 @@
 import logging
 import asyncio
+import httpx
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
-from solana.rpc.async_api import AsyncClient
-from solana.rpc.commitment import Confirmed
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,53 +19,60 @@ is_launched = False
 last_signature = None
 
 # Solana client
-solana_client = None
-
-async def init_solana():
-    global solana_client
-    solana_client = AsyncClient(SOLANA_RPC)
-    logging.info("Connected to Solana RPC")
+http_client = None
 
 async def monitor_wallet():
-    global current_ca, is_launched, last_signature
+    global current_ca, is_launched, last_signature, http_client
     
     while True:
         try:
-            if not solana_client:
-                await init_solana()
+            if not http_client:
+                http_client = httpx.AsyncClient()
+                logging.info("Connected to Solana RPC via httpx")
             
-            # Get recent signatures from creator wallet
-            signatures = await solana_client.get_signatures_for_address(
-                CREATOR_WALLET,
-                limit=5
-            )
+            # Get recent signatures from creator wallet using RPC
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [CREATOR_WALLET, {"limit": 5}]
+            }
             
-            if signatures.value:
-                latest_sig = signatures.value[0].signature
-                
-                # Check if new transaction
-                if last_signature != latest_sig:
-                    last_signature = latest_sig
+            response = await http_client.post(SOLANA_RPC, json=payload)
+            data = response.json()
+            
+            if data.get("result"):
+                signatures = data["result"]
+                if signatures:
+                    latest_sig = signatures[0]["signature"]
                     
-                    # Get transaction details
-                    try:
-                        tx = await solana_client.get_transaction(
-                            latest_sig,
-                            max_supported_transaction_version=0
-                        )
+                    # Check if new transaction
+                    if last_signature != latest_sig:
+                        last_signature = latest_sig
                         
-                        # Check for token creation (simplified)
-                        # In production, parse transaction properly
-                        if is_token_launch(tx):
-                            ca = extract_ca_from_tx(tx)
-                            if ca and ca != current_ca:
-                                current_ca = ca
-                                is_launched = True
-                                logging.info(f"🚀 LAUNCH DETECTED: {ca}")
-                                await send_launch_notification(ca)
-                                
-                    except Exception as e:
-                        logging.error(f"Error parsing transaction: {e}")
+                        # Get transaction details
+                        try:
+                            tx_payload = {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "getTransaction",
+                                "params": [latest_sig, {"maxSupportedTransactionVersion": 0}]
+                            }
+                            
+                            tx_response = await http_client.post(SOLANA_RPC, json=tx_payload)
+                            tx_data = tx_response.json()
+                            
+                            # Check for token creation
+                            if is_token_launch(tx_data):
+                                ca = extract_ca_from_tx(tx_data)
+                                if ca and ca != current_ca:
+                                    current_ca = ca
+                                    is_launched = True
+                                    logging.info(f"🚀 LAUNCH DETECTED: {ca}")
+                                    await send_launch_notification(ca)
+                                    
+                        except Exception as e:
+                            logging.error(f"Error parsing transaction: {e}")
                         
         except Exception as e:
             logging.error(f"Error monitoring wallet: {e}")
@@ -73,15 +80,15 @@ async def monitor_wallet():
             
         await asyncio.sleep(2)
 
-def is_token_launch(tx) -> bool:
+def is_token_launch(tx_data) -> bool:
     # Simplified check - in production parse transaction properly
     # Look for mint instructions, token creation patterns
     return True
 
-def extract_ca_from_tx(tx) -> str:
+def extract_ca_from_tx(tx_data) -> str:
     # Simplified extraction - in production parse properly
     # This would extract the mint address from the transaction
-    return None  # Will be set manually via /setca for now
+    return None  # Will need manual set for now
 
 async def send_launch_notification(ca):
     jupiter_url = f"https://jup.ag/swap/SOL-{ca}"
@@ -116,7 +123,7 @@ async def monitor_buys():
     
     while True:
         try:
-            if is_launched and current_ca and solana_client:
+            if is_launched and current_ca:
                 # Monitor for large buys on the token
                 # This would check the token's account for large transfers
                 # Simplified for now
