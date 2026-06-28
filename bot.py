@@ -122,7 +122,8 @@ async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if is_launched and current_ca:
             jupiter_url = f"https://jup.ag/swap/SOL-{current_ca}"
-            keyboard = [ [InlineKeyboardButton("🚀 Buy $LICAT", url=jupiter_url)],
+            keyboard = [
+                [InlineKeyboardButton("🚀 Buy $LICAT", url=jupiter_url)],
                 [InlineKeyboardButton("📊 Chart", url=f"https://pump.fun/{current_ca}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -207,7 +208,6 @@ app.add_handler(CommandHandler("price", price_command))
 app.add_handler(CommandHandler("buy", buy_command))
 app.add_handler(CommandHandler("status", status_command))
 
-if name == "__main__":
+if __name__ == "__main__":
     logging.info("Starting $LICAT bot...")
     app.run_polling()
-            
